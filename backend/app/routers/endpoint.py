@@ -1,4 +1,4 @@
-"""接口管理接口：维护API端点，覆盖提交校验、激活端点、停用端点等动作。"""
+"""接口管理接口：维护API端点，覆盖接入登记、提交校验、激活端点、停用端点等动作。"""
 from __future__ import annotations
 
 from typing import Any
@@ -20,14 +20,62 @@ STATUSES = ["草稿", "待校验", "已激活", "已停用"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按端点编号检索"),
     status: str | None = Query(default=None, description="草稿、待校验、已激活、已停用"),
+    address: str | None = Query(default=None, description="按接口地址检索（支持规范化地址匹配）"),
+    method: str | None = Query(default=None, description="按请求方法过滤"),
+    onboard_status: str | None = Query(default=None, alias="onboardStatus", description="按接入状态过滤"),
+    executable: bool | None = Query(default=None, description="只返回可执行清单，排除被驳回/隔离项"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按端点编号与状态过滤接口管理列表；没有数据时返回空页，不报错。"""
+    """按端点编号、接口地址与状态过滤接口管理列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        address=address,
+        method=method,
+        onboard_status=onboard_status,
+        executable=executable,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/quarantine", response_model=PageResult[dict])
+def list_quarantine(
+    address: str | None = Query(default=None, description="按接口地址过滤隔离记录"),
+    page: int = 1,
+    size: int = 20,
+) -> PageResult[dict]:
+    """隔离区：被拒绝的接入登记，完整请求头配置仍可回看。"""
+    items, total = service.list_quarantine(address=address, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/receipts", response_model=PageResult[dict])
+def list_receipts(
+    code: str | None = Query(default=None, description="按端点编号检索回执"),
+    page: int = 1,
+    size: int = 20,
+) -> PageResult[dict]:
+    """接入回执：按端点编号关联，成功与拒绝都留痕。"""
+    items, total = service.list_receipts(code=code, page=page, size=size)
+    return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/stats/summary")
+def onboard_stats() -> dict[str, int]:
+    """接口管理待处理区接入统计：总数、已接入、待接入、已驳回、隔离数。"""
+    return service.onboard_stats()
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出接口管理清单：返回当前过滤条件下的全量数据（不含被隔离项）。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "endpoint", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -48,6 +96,19 @@ def create_entry(payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message="API端点已登记", entry=entry)
 
 
+@router.post("/registration", response_model=ActionResult)
+def save_registration(payload: EntryPayload) -> ActionResult:
+    """端点接入登记：认证方式、请求头、参数模板与接入状态整包写入。
+
+    同一端点编号重复提交只更新一条待处理记录；同地址冲突按批次/认证模板优先级仲裁，
+    落败方隔离并按接口地址回写失败原因。任一字段未落库都不会返回成功。
+    """
+    entry, receipt = service.save_registration(payload.values)
+    if entry is None:
+        return ActionResult(ok=False, message=receipt.get("失败原因") or "接入登记被拒绝", entry=receipt)
+    return ActionResult(ok=True, message=receipt.get("回执说明") or "接入登记已保存", entry=entry)
+
+
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     """对单条API端点执行提交校验、激活端点、停用端点；不允许的动作会被拦下并说明原因。"""
@@ -56,10 +117,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出接口管理清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "endpoint", "total": total, "items": items}

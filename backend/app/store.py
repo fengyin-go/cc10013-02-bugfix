@@ -29,7 +29,11 @@ class Store:
 
     def overview(self) -> dict[str, object]:
         modules: list[dict[str, object]] = []
+        # 只统计种子模块；endpoint_quarantine / endpoint_receipt 是接入登记的辅助表，
+        # 不计入接口管理的业务模块卡片与待处理量。
         for name in self.module_names():
+            if name not in SEED_ROWS:
+                continue
             rows = self.rows(name)
             modules.append({
                 "name": name,
